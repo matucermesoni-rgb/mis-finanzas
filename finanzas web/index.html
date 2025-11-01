@@ -1,0 +1,1410 @@
+<!-- Chosen Palette: Warm Neutral & Teal/Blue Accent (Gray-100 Background, Blue-600/700 for primary actions, Teal-500/Green for success/income). -->
+<!-- Application Structure Plan: Dashboard/Sidebar Hybrid. The structure is task-oriented:
+    1. Sidebar (Fixed): Main Navigation (not fully implemented, but structural space for future growth).
+    2. Main Column:
+        a. Summary/Historical Filter (Top): Key metrics and month selection (historical analysis).
+        b. Action Center (Middle): Transaction Form, Budget Progress, and Recurrents Management.
+        c. Detailed View (Bottom): Transaction List (detailed data view) and Chart (visualization).
+    This structure was chosen to prioritize the most frequent user tasks (viewing summary, selecting month, adding transaction) at the top of the viewport, ensuring high daily usability.
+-->
+<!-- Visualization & Content Choices:
+    - Summary Stats -> Goal: Inform -> Presentation: HTML Cards (dynamic numbers) -> Interaction: Filtered by Month Selector -> Justification: Quick, high-impact overview. -> Library/Method: Vanilla JS.
+    - Expense Distribution -> Goal: Organize/Analyze -> Presentation: Doughnut Chart (Chart.js) -> Interaction: Filtered by Month Selector -> Justification: Visually shows proportional spending by category. -> Library/Method: Chart.js (Canvas).
+    - Budget Tracker -> Goal: Control -> Presentation: HTML Progress Bars -> Interaction: Managed by dedicated modal -> Justification: Provides immediate visual feedback (warning colors) on spending limits. -> Library/Method: Vanilla JS/Tailwind.
+    - Transaction/Recurrents List -> Goal: Detailed Review/Management -> Presentation: Interactive Table (HTML) -> Interaction: Filter, Delete, Edit (partial) -> Justification: Necessary for data integrity and detailed audits. -> Library/Method: Vanilla JS.
+    - Export Data -> Goal: Long-term Management -> Presentation: Button -> Interaction: Click triggers CSV download -> Justification: Backup and advanced external analysis. -> Library/Method: Vanilla JS.
+-->
+<!-- CONFIRMATION: NO SVG graphics used. NO Mermaid JS used. -->
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Control de Finanzas Personales</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f7f7f9;
+        }
+        .scroll-container {
+            max-height: 400px;
+            overflow-y: auto;
+            border-radius: 0.5rem;
+        }
+        .chart-container {
+            position: relative;
+            width: 100%;
+            max-width: 500px;
+            height: 300px; /* Responsive height constraint */
+            max-height: 400px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        /* Custom scrollbar for better aesthetics */
+        .scroll-container::-webkit-scrollbar {
+            width: 8px;
+        }
+        .scroll-container::-webkit-scrollbar-thumb {
+            background-color: #d1d5db; /* gray-300 */
+            border-radius: 4px;
+        }
+        .scroll-container::-webkit-scrollbar-track {
+            background: #f3f4f6; /* gray-100 */
+        }
+    </style>
+</head>
+<body class="min-h-screen">
+
+    <!-- Global State Variables (Accessed via JS) -->
+    <script>
+        // Variables de entorno provistas por la plataforma
+        var __app_id = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        var firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        var __initial_auth_token = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        const apiKey = ""; // API Key de Gemini
+        
+        let db;
+        let auth;
+        let userId = null;
+        let userName = 'Usuario';
+        let transactions = [];
+        let categories = [];
+        let budgets = [];
+        let recurrents = [];
+        let transactionsChart;
+
+        // Firestore Functions (Declared globally in script scope for access across functions)
+        let F_doc, F_setDoc, F_onSnapshot, F_collection, F_addDoc, F_serverTimestamp, F_deleteDoc, F_runTransaction;
+
+        // References to UI elements (Declared as let globally)
+        let mainContent;
+        let loginButton; // Now used for initial setup/cleanup
+        let changeUserButton; // New button for switching users
+
+        let userNameDisplay;
+        let userIdDisplay;
+        let summaryIngresos;
+        let summaryGastos;
+        let summarySaldo;
+        let mesActualDisplay;
+        let monthSelector;
+        let transaccionForm;
+        let transaccionType;
+        let categoriaEl;
+        let transactionsList;
+        let budgetContainer;
+        let budgetListBody;
+        let budgetChartContainer;
+        let recurrentsList;
+        let recurrentsSection;
+        let transactionsFilter;
+        let recurrentsSaveBtn;
+        let budgetModal;
+        let budgetModalForm;
+        let budgetModalCategoryList;
+        let categoryModal;
+        let categoryForm;
+        let categoriesList;
+        let recurrentModal;
+        let recurrentModalForm;
+
+        // Modal elements
+        let confirmationModal;
+        let userFormModal;
+        let userForm;
+        let confirmActionBtn;
+        let confirmationMessage;
+
+
+        // Initial setup for current month
+        const today = new Date();
+        const currentMonth = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`;
+
+        // Utility Functions
+        const formatCurrency = (amount) => {
+            return new Intl.NumberFormat('es-CO', {
+                style: 'currency',
+                currency: 'COP', // Using Colombian Peso as a generic Latin American currency
+                minimumFractionDigits: 0
+            }).format(amount);
+        };
+
+        const generateRandomColor = () => {
+            const letters = '0123456789ABCDEF';
+            let color = '#';
+            for (let i = 0; i < 6; i++) {
+                color += letters[Math.floor(Math.random() * 16)];
+            }
+            return color;
+        };
+
+        const getCategoryColor = (categoryName) => {
+            const cat = categories.find(c => c.name === categoryName);
+            return cat ? cat.color : generateRandomColor();
+        };
+
+        const openModal = (modalEl, context = null) => {
+            if (context) {
+                modalEl.dataset.context = JSON.stringify(context);
+            } else {
+                delete modalEl.dataset.context;
+            }
+            modalEl.classList.remove('hidden');
+        };
+
+        const closeModal = (modalEl) => {
+            modalEl.classList.add('hidden');
+        };
+
+        // Firebase Setup and Initialization
+        document.addEventListener('DOMContentLoaded', async () => {
+            try {
+                // Acquire DOM elements here to prevent 'null' errors
+                mainContent = document.getElementById('main-content');
+                changeUserButton = document.getElementById('change-user-btn');
+
+                userNameDisplay = document.getElementById('user-name-display');
+                userIdDisplay = document.getElementById('user-id-display');
+                summaryIngresos = document.getElementById('summary-ingresos');
+                summaryGastos = document.getElementById('summary-gastos');
+                summarySaldo = document.getElementById('summary-saldo');
+                mesActualDisplay = document.getElementById('mes-actual-display');
+                monthSelector = document.getElementById('month-selector');
+                transaccionForm = document.getElementById('transaccion-form');
+                transaccionType = document.getElementById('transaccion-type');
+                categoriaEl = document.getElementById('categoria');
+                transactionsList = document.getElementById('transactions-list');
+                budgetContainer = document.getElementById('budget-container');
+                budgetListBody = document.getElementById('budget-list-body-summary');
+                budgetChartContainer = document.getElementById('budget-chart-container');
+                recurrentsList = document.getElementById('recurrents-list');
+                recurrentsSection = document.getElementById('recurrents-section');
+                transactionsFilter = document.getElementById('transactions-filter');
+                recurrentsSaveBtn = document.getElementById('recurrents-save-btn');
+                budgetModal = document.getElementById('budget-modal');
+                budgetModalForm = document.getElementById('budget-modal-form');
+                budgetModalCategoryList = document.getElementById('budget-modal-category-list');
+                categoryModal = document.getElementById('category-modal');
+                categoryForm = document.getElementById('category-form');
+                categoriesList = document.getElementById('categories-list');
+                recurrentModal = document.getElementById('recurrent-modal');
+                recurrentModalForm = document.getElementById('recurrent-modal-form');
+
+                confirmationModal = document.getElementById('confirmation-modal');
+                userFormModal = document.getElementById('user-form-modal');
+                userForm = document.getElementById('user-form');
+                confirmActionBtn = document.getElementById('confirm-action-btn');
+                confirmationMessage = document.getElementById('confirmation-message');
+
+                // Dynamic imports
+                const { initializeApp } = await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js");
+                const { getAuth, signOut, onAuthStateChanged, signInAnonymously, signInWithCustomToken } = await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js");
+                const { getFirestore, doc, setDoc, onSnapshot, collection, query, addDoc, serverTimestamp, deleteDoc, runTransaction, enableIndexedDbPersistence } = await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js");
+                
+                // Assign imported functions to global F_ variables for scope visibility
+                F_doc = doc;
+                F_setDoc = setDoc;
+                F_onSnapshot = onSnapshot;
+                F_collection = collection;
+                F_addDoc = addDoc;
+                F_serverTimestamp = serverTimestamp;
+                F_deleteDoc = deleteDoc;
+                F_runTransaction = runTransaction;
+
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                // Enable Offline Persistence
+                try {
+                    await enableIndexedDbPersistence(db);
+                } catch (err) {
+                    console.error("Firestore persistence failed:", err);
+                }
+
+                // Global event listeners
+                monthSelector.value = currentMonth;
+                monthSelector.addEventListener('change', () => {
+                    recalculateReport();
+                    updateHeader();
+                });
+                
+                transaccionType.addEventListener('change', toggleCategoriaField);
+                transaccionForm.addEventListener('submit', handleNewTransaction);
+                categoryForm.addEventListener('submit', handleNewCategory);
+                budgetModalForm.addEventListener('submit', handleBudgetUpdate);
+                recurrentModalForm.addEventListener('submit', handleNewRecurrent);
+                recurrentsSaveBtn.addEventListener('click', saveGeneratedRecurrents);
+                changeUserButton.addEventListener('click', handleUserChange);
+                
+                // Initial Sign-In (Using custom token or anonymous)
+                await initialSignIn(auth, signInWithCustomToken, signInAnonymously);
+
+                // Auth State Listener
+                onAuthStateChanged(auth, handleAuthStatus);
+
+            } catch (error) {
+                console.error("Error during Firebase initialization or module loading:", error);
+            }
+        });
+
+        const initialSignIn = async (authInstance, signInWithCustomToken, signInAnonymously) => {
+            if (authInstance.currentUser) return; // Already logged in
+
+            try {
+                if (__initial_auth_token) {
+                    await signInWithCustomToken(authInstance, __initial_auth_token);
+                } else {
+                    // Fallback to anonymous sign-in if no token is available
+                    await signInAnonymously(authInstance);
+                }
+            } catch (error) {
+                console.error("Error en el inicio de sesión inicial:", error);
+                // Attempt anonymous sign-in if custom token fails
+                try {
+                    await signInAnonymously(authInstance);
+                } catch (anonError) {
+                    console.error("Falló el inicio de sesión anónimo:", anonError);
+                }
+            }
+        };
+
+        const toggleCategoriaField = () => {
+            if (transaccionType.value === 'gasto') {
+                categoriaEl.disabled = false;
+                categoriaEl.classList.remove('opacity-50');
+            } else {
+                categoriaEl.disabled = true;
+                categoriaEl.classList.add('opacity-50');
+            }
+        };
+
+        const resetAppState = () => {
+            transactions = [];
+            categories = [];
+            budgets = [];
+            recurrents = [];
+            userName = 'Usuario';
+            
+            // Clear UI elements
+            summaryIngresos.textContent = formatCurrency(0);
+            summaryGastos.textContent = formatCurrency(0);
+            summarySaldo.textContent = formatCurrency(0);
+            transactionsList.innerHTML = '';
+            if (budgetListBody) budgetListBody.innerHTML = '';
+            recurrentsList.innerHTML = '';
+            categoriaEl.innerHTML = '';
+            categoriesList.innerHTML = '';
+
+            // Ensure category dropdown is disabled for income
+            categoriaEl.disabled = true;
+            categoriaEl.classList.add('opacity-50');
+            
+            // Hide recurrents save button
+            recurrentsSaveBtn.classList.add('hidden');
+
+            // Show main content and hide login (since login is automatic)
+            mainContent.classList.remove('hidden');
+            document.getElementById('login-screen').style.display = 'none';
+        };
+
+        const handleAuthStatus = (user) => {
+            resetAppState();
+            if (user) {
+                userId = user.uid;
+                // Start data listeners
+                setupDataListeners();
+                
+                // Check and set user name
+                checkUserName();
+            } else {
+                // User signed out (likely by handleUserChange)
+                userId = null;
+                updateHeader();
+                // Optionally show a message that a new user session is starting
+            }
+        };
+
+        const handleUserChange = async () => {
+            openModal(confirmationModal, { action: 'changeUser' });
+            confirmationMessage.textContent = '¿Estás seguro de que deseas cambiar de perfil? Esto cerrará tu sesión actual y creará un nuevo perfil vacío, perfecto para otro miembro de la familia.';
+            confirmActionBtn.classList.remove('bg-red-600');
+            confirmActionBtn.classList.add('bg-blue-600');
+        };
+
+        const confirmUserChange = async () => {
+             try {
+                // Sign out the current user session
+                await signOut(auth);
+                // Force a new anonymous sign-in immediately to generate a new unique ID
+                await signInAnonymously(auth);
+                // onAuthStateChanged will handle the rest (resetting state and prompting for name)
+            } catch (error) {
+                console.error("Error al generar nueva sesión de usuario:", error);
+            }
+        };
+
+        const checkUserName = async () => {
+            const profileRef = F_doc(db, 'artifacts', __app_id, 'users', userId, 'profile', 'data');
+            const unsubscribe = F_onSnapshot(profileRef, (docSnap) => {
+                if (docSnap.exists() && docSnap.data().name) {
+                    userName = docSnap.data().name;
+                    updateHeader();
+                    closeModal(userFormModal);
+                } else {
+                    // Prompt user to set name if not set
+                    openModal(userFormModal);
+                }
+            }, (error) => {
+                console.error("Error checking user name:", error);
+            });
+            // Keeping the unsubscribe function local to prevent memory leaks is complex in this structure,
+            // relying on the global listener simplicity for this SPA context.
+        };
+
+        const updateHeader = () => {
+            // Check if auth.currentUser is available, otherwise use default
+            const userIdentifier = auth.currentUser ? (auth.currentUser.email || 'Anónimo') : 'No Autenticado';
+            
+            userNameDisplay.textContent = userName;
+            userIdDisplay.textContent = `${userIdentifier} (ID: ${userId ? userId.substring(0, 8) + '...' : 'N/A'})`;
+            
+            // Update the main title
+            document.getElementById('main-app-title').textContent = `Control de Finanzas de ${userName}`;
+            
+            // Update month display
+            const [year, month] = monthSelector.value.split('-');
+            const date = new Date(year, month - 1);
+            mesActualDisplay.textContent = date.toLocaleDateString('es-CO', { year: 'numeric', month: 'long' });
+        };
+
+        // --- Core Data Listeners ---
+        const setupDataListeners = () => {
+            // Listener for Transactions
+            F_onSnapshot(F_collection(db, 'artifacts', __app_id, 'users', userId, 'transactions'), (snapshot) => {
+                transactions = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                recalculateReport();
+            }, (error) => console.error("Error fetching transactions:", error));
+
+            // Listener for Categories
+            F_onSnapshot(F_collection(db, 'artifacts', __app_id, 'users', userId, 'categories'), (snapshot) => {
+                categories = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                updateCategoryDropdowns();
+                updateCategoriesList();
+                recalculateReport(); // Recalculate in case categories changed/were deleted
+            }, (error) => console.error("Error fetching categories:", error));
+
+            // Listener for Budgets
+            F_onSnapshot(F_collection(db, 'artifacts', __app_id, 'users', userId, 'budgets'), (snapshot) => {
+                budgets = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                recalculateReport();
+            }, (error) => console.error("Error fetching budgets:", error));
+
+            // Listener for Recurrents
+            F_onSnapshot(F_collection(db, 'artifacts', __app_id, 'users', userId, 'recurrents'), (snapshot) => {
+                recurrents = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                updateRecurrentsList();
+                recalculateReport(); // Recalculate to check for new recurrents to generate
+            }, (error) => console.error("Error fetching recurrents:", error));
+        };
+
+        // --- Category Management ---
+        const updateCategoryDropdowns = () => {
+            if (categoriaEl) { // ADDED NULL CHECK
+                categoriaEl.innerHTML = categories.map(c => `<option value="${c.name}">${c.name}</option>`).join('');
+            }
+            
+            if (budgetModalCategoryList) { // ADDED NULL CHECK
+                budgetModalCategoryList.innerHTML = categories.map(c => 
+                    `<option value="${c.name}">${c.name}</option>`
+                ).join('');
+            }
+            
+            // Recurrent Category Dropdown also needs updating (using the same categories)
+            const recurrentCategoryEl = document.getElementById('recurrent-category');
+            if (recurrentCategoryEl) {
+                recurrentCategoryEl.innerHTML = `<option value="N/A">N/A (Ingreso)</option>` + categories.map(c => 
+                    `<option value="${c.name}">${c.name}</option>`
+                ).join('');
+            }
+        };
+
+        const updateCategoriesList = () => {
+            categoriesList.innerHTML = categories.map(c => `
+                <li class="flex justify-between items-center p-2 border-b last:border-b-0">
+                    <div class="flex items-center">
+                        <span style="background-color: ${c.color};" class="w-3 h-3 rounded-full mr-2"></span>
+                        <span class="text-gray-700">${c.name}</span>
+                    </div>
+                    <button onclick="handleDeleteCategory('${c.id}', '${c.name}')" class="text-red-500 hover:text-red-700 p-1 rounded-full hover:bg-red-100 transition-colors">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm4 0a1 1 0 10-2 0v6a1 1 0 102 0V8z" clip-rule="evenodd" />
+                        </svg>
+                    </button>
+                </li>
+            `).join('');
+        };
+
+        const handleNewCategory = async (e) => {
+            e.preventDefault();
+            const name = e.target.elements['category-name'].value.trim();
+            if (!name) return;
+
+            // Check if category already exists
+            if (categories.some(c => c.name.toLowerCase() === name.toLowerCase())) {
+                alert('La categoría ya existe.');
+                return;
+            }
+
+            const categoryData = {
+                name: name,
+                color: generateRandomColor(),
+                createdAt: F_serverTimestamp()
+            };
+
+            try {
+                await F_addDoc(F_collection(db, 'artifacts', __app_id, 'users', userId, 'categories'), categoryData);
+                e.target.reset();
+                closeModal(categoryModal);
+            } catch (error) {
+                console.error("Error adding category:", error);
+            }
+        };
+
+        const handleDeleteCategory = (categoryId, categoryName) => {
+            const hasTransactions = transactions.some(t => t.category === categoryName);
+
+            let message = `¿Estás seguro de que quieres eliminar la categoría "${categoryName}"? Esta acción no se puede deshacer.`;
+            if (hasTransactions) {
+                message = `¡Advertencia! La categoría "${categoryName}" tiene transacciones asociadas. Eliminarlas puede afectar tus análisis históricos. ¿Continuar?`;
+                confirmActionBtn.classList.remove('bg-blue-600');
+                confirmActionBtn.classList.add('bg-red-600');
+            } else {
+                confirmActionBtn.classList.remove('bg-red-600');
+                confirmActionBtn.classList.add('bg-blue-600');
+            }
+
+            openModal(confirmationModal, { action: 'deleteCategory', id: categoryId, name: categoryName });
+            confirmationMessage.textContent = message;
+        };
+
+        const confirmDeleteCategory = async (categoryId) => {
+            try {
+                await F_deleteDoc(F_doc(db, 'artifacts', __app_id, 'users', userId, 'categories', categoryId));
+            } catch (error) {
+                console.error("Error deleting category:", error);
+                // Simple warning for the user if delete fails due to permissions or connection
+                alert('Hubo un error al eliminar la categoría. Inténtalo de nuevo.');
+            }
+        };
+
+        // --- Budget Management ---
+        const handleBudgetUpdate = async (e) => {
+            e.preventDefault();
+            const category = e.target.elements['budget-category'].value;
+            const amount = parseFloat(e.target.elements['budget-amount'].value);
+
+            if (!category || isNaN(amount) || amount <= 0) return;
+
+            const budgetId = category.toLowerCase().replace(/\s/g, '_'); // Use category name as ID for simplicity
+
+            const budgetRef = F_doc(db, 'artifacts', __app_id, 'users', userId, 'budgets', budgetId);
+
+            try {
+                await F_setDoc(budgetRef, {
+                    category: category,
+                    amount: amount,
+                    updatedAt: F_serverTimestamp()
+                }, { merge: true });
+                e.target.reset();
+                closeModal(budgetModal);
+            } catch (error) {
+                console.error("Error setting budget:", error);
+            }
+        };
+
+        // --- Recurrents Management ---
+        const updateRecurrentsList = () => {
+            recurrentsList.innerHTML = recurrents.map(r => `
+                <li class="flex justify-between items-center p-2 border-b last:border-b-0 text-sm">
+                    <div class="flex-grow">
+                        <span class="font-semibold">${r.description}</span>
+                        <span class="text-xs ml-2 text-gray-500">(${r.category})</span>
+                    </div>
+                    <div class="flex items-center space-x-3">
+                        <span class="${r.type === 'ingreso' ? 'text-green-600' : 'text-red-600'} font-medium">${r.type === 'ingreso' ? '+' : '-'} ${formatCurrency(r.amount)}</span>
+                        <span class="bg-blue-100 text-blue-800 text-xs font-medium px-2.5 py-0.5 rounded-full">Día ${r.dayOfMonth}</span>
+                        <button onclick="handleDeleteRecurrent('${r.id}')" class="text-red-500 hover:text-red-700 p-1 rounded-full hover:bg-red-100 transition-colors">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                                <path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm4 0a1 1 0 10-2 0v6a1 1 0 102 0V8z" clip-rule="evenodd" />
+                            </svg>
+                        </button>
+                    </div>
+                </li>
+            `).join('');
+        };
+
+        const handleNewRecurrent = async (e) => {
+            e.preventDefault();
+            const description = e.target.elements['recurrent-description'].value.trim();
+            const amount = parseFloat(e.target.elements['recurrent-amount'].value);
+            const type = e.target.elements['recurrent-type'].value;
+            const category = e.target.elements['recurrent-category'].value;
+            const dayOfMonth = parseInt(e.target.elements['recurrent-day'].value);
+
+            if (!description || isNaN(amount) || amount <= 0 || !category || isNaN(dayOfMonth) || dayOfMonth < 1 || dayOfMonth > 31) return;
+
+            const recurrentData = {
+                description,
+                amount,
+                type,
+                category,
+                dayOfMonth,
+                createdAt: F_serverTimestamp()
+            };
+
+            try {
+                await F_addDoc(F_collection(db, 'artifacts', __app_id, 'users', userId, 'recurrents'), recurrentData);
+                e.target.reset();
+                closeModal(recurrentModal);
+            } catch (error) {
+                console.error("Error setting recurrent transaction:", error);
+            }
+        };
+
+        const handleDeleteRecurrent = (recurrentId) => {
+            openModal(confirmationModal, { action: 'deleteRecurrent', id: recurrentId });
+            confirmationMessage.textContent = '¿Estás seguro de que quieres eliminar este movimiento recurrente?';
+            confirmActionBtn.classList.remove('bg-red-600');
+            confirmActionBtn.classList.add('bg-blue-600');
+        };
+
+        const confirmDeleteRecurrent = async (recurrentId) => {
+            try {
+                await F_deleteDoc(F_doc(db, 'artifacts', __app_id, 'users', userId, 'recurrents', recurrentId));
+            } catch (error) {
+                console.error("Error deleting recurrent:", error);
+            }
+        };
+
+        // --- Transaction Management ---
+        const handleNewTransaction = async (e) => {
+            e.preventDefault();
+            
+            const description = e.target.elements['transaccion-description'].value.trim();
+            const amount = parseFloat(e.target.elements['transaccion-amount'].value);
+            const type = e.target.elements['transaccion-type'].value;
+            const category = type === 'gasto' ? e.target.elements['categoria'].value : 'N/A';
+            const dateInput = e.target.elements['transaccion-date'].value;
+            
+            if (!description || isNaN(amount) || amount <= 0 || (type === 'gasto' && !category)) return;
+            
+            const transactionDate = new Date(dateInput);
+            if (isNaN(transactionDate)) return;
+
+            const transactionData = {
+                description,
+                amount,
+                type,
+                category,
+                date: transactionDate,
+                createdAt: F_serverTimestamp()
+            };
+
+            try {
+                await F_addDoc(F_collection(db, 'artifacts', __app_id, 'users', userId, 'transactions'), transactionData);
+                e.target.reset();
+                toggleCategoriaField();
+            } catch (error) {
+                console.error("Error adding transaction:", error);
+            }
+        };
+
+        const handleDeleteTransaction = (transactionId) => {
+            openModal(confirmationModal, { action: 'deleteTransaction', id: transactionId });
+            confirmationMessage.textContent = '¿Estás seguro de que quieres eliminar esta transacción? Esta acción no se puede deshacer.';
+            confirmActionBtn.classList.remove('bg-red-600');
+            confirmActionBtn.classList.add('bg-blue-600');
+        };
+
+        const confirmDeleteTransaction = async (transactionId) => {
+            try {
+                await F_deleteDoc(F_doc(db, 'artifacts', __app_id, 'users', userId, 'transactions', transactionId));
+            } catch (error) {
+                console.error("Error deleting transaction:", error);
+            }
+        };
+
+        // --- Core Recalculation and Reporting ---
+        const filterTransactionsByMonthYear = (allTransactions, selectedMonth) => {
+            const [year, month] = selectedMonth.split('-');
+            const startDate = new Date(year, month - 1, 1);
+            const endDate = new Date(year, month, 0); // Last day of the month
+
+            return allTransactions.filter(t => {
+                let transactionDate;
+                if (t.date && t.date.toDate) {
+                    transactionDate = t.date.toDate();
+                } else if (t.date instanceof Date) {
+                    transactionDate = t.date;
+                } else {
+                    return false; // Skip transactions without valid date
+                }
+                return transactionDate >= startDate && transactionDate <= endDate;
+            });
+        };
+
+        const generateRecurrentsForMonth = (filteredRecurrents, transactionsInMonth, selectedMonth) => {
+            const [year, month] = selectedMonth.split('-');
+            const monthNumber = parseInt(month);
+            
+            const generatedRecurrents = [];
+
+            for (const recurrent of filteredRecurrents) {
+                const day = recurrent.dayOfMonth;
+                const recurrentDate = new Date(year, monthNumber - 1, day);
+                
+                // Check if a transaction matching this recurrent already exists
+                const alreadyExists = transactionsInMonth.some(t => {
+                    // Simple check based on description, amount, type, and category
+                    return t.description === recurrent.description &&
+                           t.amount === recurrent.amount &&
+                           t.type === recurrent.type &&
+                           t.category === recurrent.category;
+                    // Note: A more robust system would use a recurrentId field on the transaction itself.
+                });
+
+                if (!alreadyExists && recurrentDate <= today) {
+                    generatedRecurrents.push({
+                        ...recurrent,
+                        date: recurrentDate, // Set the date for the current month
+                        id: `RECURRENT_${Math.random().toString(36).substring(2, 9)}`,
+                        isRecurrent: true,
+                        isPending: true
+                    });
+                }
+            }
+            return generatedRecurrents;
+        };
+
+        const saveGeneratedRecurrents = async () => {
+            const pendingRecurrents = transactions.filter(t => t.isPending);
+            if (pendingRecurrents.length === 0) return;
+
+            try {
+                await F_runTransaction(db, async (transaction) => {
+                    for (const recurrent of pendingRecurrents) {
+                        const transactionRef = F_collection(db, 'artifacts', __app_id, 'users', userId, 'transactions');
+                        
+                        const transactionData = {
+                            description: recurrent.description,
+                            amount: recurrent.amount,
+                            type: recurrent.type,
+                            category: recurrent.category,
+                            date: recurrent.date,
+                            isRecurrent: true,
+                            createdAt: F_serverTimestamp()
+                        };
+                        transaction.set(F_doc(transactionRef), transactionData);
+                    }
+                });
+                // After successful transaction, hide the button
+                recurrentsSaveBtn.classList.add('hidden');
+            } catch (error) {
+                console.error("Transaction failed: Failed to save recurrents", error);
+                alert("Error al guardar movimientos recurrentes. Inténtalo de nuevo.");
+            }
+        };
+
+        const recalculateReport = () => {
+            if (!userId) return;
+
+            const selectedMonth = monthSelector.value;
+            const transactionsInMonth = filterTransactionsByMonthYear(transactions, selectedMonth);
+
+            // 1. Generate recurrents for the month and merge
+            const generatedRecurrents = generateRecurrentsForMonth(recurrents, transactionsInMonth, selectedMonth);
+            const allMonthTransactions = [...transactionsInMonth, ...generatedRecurrents];
+            
+            // Show/Hide save recurrents button
+            if (generatedRecurrents.length > 0) {
+                recurrentsSaveBtn.textContent = `Guardar ${generatedRecurrents.length} Recurrentes Generados`;
+                recurrentsSaveBtn.classList.remove('hidden');
+            } else {
+                recurrentsSaveBtn.classList.add('hidden');
+            }
+
+            // 2. Calculate Summary
+            let ingresosTotal = 0;
+            let gastosTotal = 0;
+            const categoryExpenses = {};
+            const categoryColors = {};
+
+            allMonthTransactions.forEach(t => {
+                if (t.type === 'ingreso') {
+                    ingresosTotal += t.amount;
+                } else if (t.type === 'gasto') {
+                    gastosTotal += t.amount;
+                    categoryExpenses[t.category] = (categoryExpenses[t.category] || 0) + t.amount;
+                    categoryColors[t.category] = getCategoryColor(t.category);
+                }
+            });
+
+            const saldo = ingresosTotal - gastosTotal;
+
+            // 3. Update UI
+            updateSummary(ingresosTotal, gastosTotal, saldo);
+            updateBudgetSummary(categoryExpenses, gastosTotal);
+            updateTransactionsList(allMonthTransactions, selectedMonth);
+            updateChart(categoryExpenses, categoryColors);
+        };
+
+        const updateSummary = (ingresosTotal, gastosTotal, saldo) => {
+            summaryIngresos.textContent = formatCurrency(ingresosTotal);
+            summaryGastos.textContent = formatCurrency(gastosTotal);
+            summarySaldo.textContent = formatCurrency(saldo);
+
+            summarySaldo.classList.remove('text-green-600', 'text-red-600', 'text-gray-700');
+            if (saldo > 0) {
+                summarySaldo.classList.add('text-green-600');
+            } else if (saldo < 0) {
+                summarySaldo.classList.add('text-red-600');
+            } else {
+                summarySaldo.classList.add('text-gray-700');
+            }
+        };
+
+        const updateBudgetSummary = (categoryExpenses) => {
+            budgetListBody.innerHTML = ''; // Clear previous budgets
+
+            if (budgets.length === 0) {
+                budgetListBody.innerHTML = '<tr><td colspan="4" class="p-3 text-center text-gray-500">No hay presupuestos definidos.</td></tr>';
+                return;
+            }
+
+            budgets.forEach(b => {
+                const spent = categoryExpenses[b.category] || 0;
+                const remaining = b.amount - spent;
+                const percentage = Math.min(100, (spent / b.amount) * 100);
+
+                let progressColor = 'bg-blue-500';
+                if (percentage >= 100) {
+                    progressColor = 'bg-red-600'; // Exceeded
+                } else if (percentage >= 75) {
+                    progressColor = 'bg-yellow-500'; // Warning
+                } else if (percentage < 75) {
+                    progressColor = 'bg-green-500'; // OK
+                }
+                
+                budgetListBody.innerHTML += `
+                    <tr>
+                        <td class="px-4 py-2 font-medium">${b.category}</td>
+                        <td class="px-4 py-2">${formatCurrency(b.amount)}</td>
+                        <td class="px-4 py-2">${formatCurrency(spent)}</td>
+                        <td class="px-4 py-2">
+                            <div class="relative pt-1">
+                                <div class="flex mb-2 items-center justify-between">
+                                    <span class="text-xs font-semibold inline-block text-gray-600">
+                                        ${percentage.toFixed(0)}% (${formatCurrency(remaining)})
+                                    </span>
+                                </div>
+                                <div class="overflow-hidden h-2 mb-4 text-xs flex rounded bg-gray-200">
+                                    <div style="width:${percentage}%" class="shadow-none flex flex-col text-center whitespace-nowrap text-white justify-center ${progressColor} rounded"></div>
+                                </div>
+                            </div>
+                        </td>
+                    </tr>
+                `;
+            });
+        };
+
+        const updateTransactionsList = (allMonthTransactions) => {
+            transactionsList.innerHTML = '';
+            
+            if (allMonthTransactions.length === 0) {
+                transactionsList.innerHTML = `
+                    <div class="text-center py-8 text-gray-500">
+                        No hay transacciones ni movimientos recurrentes para el mes seleccionado.
+                    </div>
+                `;
+                return;
+            }
+
+            const currentFilter = transactionsFilter.querySelector('.bg-blue-600').dataset.filter;
+
+            const filteredList = allMonthTransactions.filter(t => {
+                if (currentFilter === 'all') return true;
+                if (currentFilter === 'income' && t.type === 'ingreso') return true;
+                if (currentFilter === 'expense' && t.type === 'gasto') return true;
+                return false;
+            });
+
+            filteredList
+                .sort((a, b) => b.date - a.date) // Sort by date descending
+                .forEach(t => {
+                
+                const typeClass = t.type === 'ingreso' ? 'text-green-600' : 'text-red-600';
+                const sign = t.type === 'ingreso' ? '+' : '-';
+                const dateString = t.date.toLocaleDateString('es-CO');
+                
+                let actionButton = '';
+                let statusBadge = '';
+
+                if (t.isPending) {
+                    statusBadge = '<span class="ml-2 bg-yellow-100 text-yellow-800 text-xs font-medium mr-2 px-2.5 py-0.5 rounded-full">Pendiente (Recurrente)</span>';
+                    // No delete button for pending items, they must be saved or ignored
+                } else {
+                    actionButton = `<button onclick="handleDeleteTransaction('${t.id}')" class="text-red-500 hover:text-red-700 p-1 rounded-full hover:bg-red-100 transition-colors">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm4 0a1 1 0 10-2 0v6a1 1 0 102 0V8z" clip-rule="evenodd" />
+                        </svg>
+                    </button>`;
+                }
+                
+                const categoryBadge = t.type === 'gasto' ? `<span style="background-color: ${getCategoryColor(t.category)};" class="text-white text-xs font-medium mr-2 px-2.5 py-0.5 rounded-full">${t.category}</span>` : '';
+
+                transactionsList.innerHTML += `
+                    <li class="flex justify-between items-center p-3 border-b hover:bg-gray-50 transition-colors">
+                        <div class="flex-grow">
+                            <p class="font-medium text-gray-800">${t.description} ${statusBadge}</p>
+                            <p class="text-xs text-gray-500 mt-1">${dateString} ${categoryBadge}</p>
+                        </div>
+                        <div class="flex items-center space-x-3">
+                            <span class="${typeClass} font-semibold">${sign} ${formatCurrency(t.amount)}</span>
+                            ${actionButton}
+                        </div>
+                    </li>
+                `;
+            });
+        };
+
+        // Chart.js Configuration
+        const setupChart = (canvasEl) => {
+            if (transactionsChart) {
+                transactionsChart.destroy();
+            }
+            const data = {
+                labels: [],
+                datasets: [{
+                    data: [],
+                    backgroundColor: [],
+                    hoverOffset: 4
+                }]
+            };
+
+            const config = {
+                type: 'doughnut',
+                data: data,
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'bottom',
+                            labels: {
+                                font: {
+                                    size: 12
+                                }
+                            }
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    let label = context.label || '';
+                                    if (label) {
+                                        label += ': ';
+                                    }
+                                    if (context.parsed !== null) {
+                                        label += formatCurrency(context.parsed);
+                                    }
+                                    return label;
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+            transactionsChart = new Chart(canvasEl, config);
+        };
+
+        const updateChart = (categoryExpenses, categoryColors) => {
+            const canvasEl = document.getElementById('expense-chart');
+            if (!transactionsChart) {
+                setupChart(canvasEl);
+            }
+
+            const labels = Object.keys(categoryExpenses);
+            const data = labels.map(label => categoryExpenses[label]);
+            const colors = labels.map(label => categoryColors[label]);
+
+            transactionsChart.data.labels = labels;
+            transactionsChart.data.datasets[0].data = data;
+            transactionsChart.data.datasets[0].backgroundColor = colors;
+            transactionsChart.update();
+        };
+
+        // --- Event Handlers ---
+        const handleFilterClick = (e) => {
+            const filterType = e.target.dataset.filter;
+            if (!filterType) return;
+
+            transactionsFilter.querySelectorAll('button').forEach(btn => {
+                btn.classList.remove('bg-blue-600', 'text-white');
+                btn.classList.add('bg-white', 'text-blue-600', 'hover:bg-blue-50');
+            });
+
+            e.target.classList.remove('bg-white', 'text-blue-600', 'hover:bg-blue-50');
+            e.target.classList.add('bg-blue-600', 'text-white');
+
+            recalculateReport(); // Triggers re-render with new filter
+        };
+
+        const handleConfirmation = () => {
+            const context = JSON.parse(confirmationModal.dataset.context);
+            if (!context) return;
+
+            if (context.action === 'deleteTransaction') {
+                confirmDeleteTransaction(context.id);
+            } else if (context.action === 'deleteCategory') {
+                confirmDeleteCategory(context.id);
+            } else if (context.action === 'deleteRecurrent') {
+                confirmDeleteRecurrent(context.id);
+            } else if (context.action === 'changeUser') {
+                confirmUserChange();
+            }
+
+            closeModal(confirmationModal);
+        };
+
+        // --- Export Functionality ---
+        const exportToCsv = () => {
+            const exportScope = document.getElementById('export-scope').value;
+            let dataToExport;
+            let fileNameSuffix;
+
+            if (exportScope === 'currentMonth') {
+                const selectedMonth = monthSelector.value;
+                dataToExport = filterTransactionsByMonthYear(transactions, selectedMonth).filter(t => !t.isPending);
+                fileNameSuffix = selectedMonth.replace('-', '_') + '_MENSUAL';
+            } else {
+                dataToExport = transactions.filter(t => !t.isPending);
+                fileNameSuffix = 'HISTORIAL_COMPLETO';
+            }
+
+            if (dataToExport.length === 0) {
+                alert('No hay datos para exportar en el alcance seleccionado.');
+                return;
+            }
+
+            // Headers for the CSV file
+            const headers = ['ID', 'Descripción', 'Monto', 'Tipo', 'Categoría', 'Fecha de Transacción', 'Fecha de Registro (Firestore)'];
+            
+            // Format data rows
+            const csvRows = dataToExport.map(t => {
+                const dateString = t.date.toLocaleDateString('es-CO');
+                const createdAtString = t.createdAt ? t.createdAt.toDate().toLocaleString('es-CO') : 'N/A';
+                
+                return [
+                    t.id,
+                    `"${t.description.replace(/"/g, '""')}"`, // Escape quotes in description
+                    t.amount.toFixed(2),
+                    t.type,
+                    t.category,
+                    dateString,
+                    createdAtString
+                ].join(',');
+            });
+
+            // Combine headers and rows
+            const csvContent = [headers.join(','), ...csvRows].join('\n');
+
+            // Create Blob and download
+            const blob = new Blob(["\ufeff", csvContent], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement("a");
+            if (link.download !== undefined) {
+                const url = URL.createObjectURL(blob);
+                link.setAttribute("href", url);
+                link.setAttribute("download", `finanzas_${fileNameSuffix}.csv`);
+                link.style.visibility = 'hidden';
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            } else {
+                alert('Tu navegador no soporta la descarga directa. Copia el contenido manualmente.');
+            }
+        };
+
+        const handleSetUserName = async (e) => {
+            e.preventDefault();
+            const newName = e.target.elements['new-user-name'].value.trim();
+            if (!newName) return;
+
+            const profileRef = F_doc(db, 'artifacts', __app_id, 'users', userId, 'profile', 'data');
+            
+            try {
+                await F_setDoc(profileRef, {
+                    name: newName,
+                    email: auth.currentUser.email || 'Anónimo',
+                    updatedAt: F_serverTimestamp()
+                }, { merge: true });
+                // The onSnapshot listener will update the UI and close the modal
+            } catch (error) {
+                console.error("Error setting user name:", error);
+            }
+        };
+
+    </script>
+
+    <!-- Modals -->
+    <!-- 1. Confirmation Modal -->
+    <div id="confirmation-modal" class="modal-backdrop hidden fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center p-4 z-50">
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-sm transform transition-all">
+            <div class="p-6">
+                <p id="confirmation-message" class="text-lg font-semibold text-gray-800 mb-6"></p>
+                <div class="flex justify-end space-x-3">
+                    <button onclick="closeModal(confirmationModal)" class="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors">
+                        Cancelar
+                    </button>
+                    <button id="confirm-action-btn" onclick="handleConfirmation()" class="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors">
+                        Confirmar
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 2. Set Name Modal -->
+    <div id="user-form-modal" class="modal-backdrop hidden fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center p-4 z-40">
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-md transform transition-all">
+            <form id="user-form" onsubmit="handleSetUserName(event)" class="p-6">
+                <h3 class="text-2xl font-bold text-gray-800 mb-4">Bienvenido</h3>
+                <p class="text-gray-600 mb-6">Para empezar, por favor dinos cómo te llamas para personalizar tu control financiero.</p>
+                <div class="mb-4">
+                    <label for="new-user-name" class="block text-sm font-medium text-gray-700 mb-1">Tu Nombre</label>
+                    <input type="text" id="new-user-name" name="new-user-name" required class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" placeholder="Ej: Juan Pérez">
+                </div>
+                <button type="submit" class="w-full py-3 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 transition-colors">
+                    Guardar y Continuar
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <!-- 3. Budget Modal -->
+    <div id="budget-modal" class="modal-backdrop hidden fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center p-4 z-40">
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg transform transition-all">
+            <form id="budget-modal-form" class="p-6">
+                <h3 class="text-2xl font-bold text-gray-800 mb-6">Establecer Presupuesto Mensual</h3>
+                
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                    <div>
+                        <label for="budget-category" class="block text-sm font-medium text-gray-700 mb-1">Categoría</label>
+                        <select id="budget-category" name="budget-category" required class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500">
+                            <option value="">Selecciona Categoría...</option>
+                            <!-- Options populated by JS: budgetModalCategoryList -->
+                        </select>
+                    </div>
+                    <div>
+                        <label for="budget-amount" class="block text-sm font-medium text-gray-700 mb-1">Monto Límite (COP)</label>
+                        <input type="number" id="budget-amount" name="budget-amount" min="1" step="any" required class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" placeholder="500000">
+                    </div>
+                </div>
+
+                <div class="mb-6">
+                    <h4 class="font-semibold text-gray-700 mb-2">Presupuestos Activos:</h4>
+                    <div class="scroll-container bg-gray-50 border border-gray-200 rounded-lg">
+                        <table class="min-w-full divide-y divide-gray-200">
+                            <tbody id="budget-list-body-summary" class="bg-white divide-y divide-gray-200">
+                                <!-- Populated by JS -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="flex justify-end space-x-3">
+                    <button type="button" onclick="closeModal(budgetModal)" class="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors">
+                        Cerrar
+                    </button>
+                    <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 transition-colors">
+                        Guardar Presupuesto
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+    
+    <!-- 4. Categories Modal -->
+    <div id="category-modal" class="modal-backdrop hidden fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center p-4 z-40">
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-md transform transition-all">
+            <div class="p-6">
+                <h3 class="text-2xl font-bold text-gray-800 mb-4">Gestión de Categorías</h3>
+                
+                <form id="category-form" class="mb-6 space-y-3">
+                    <label for="category-name" class="block text-sm font-medium text-gray-700">Añadir Nueva Categoría</label>
+                    <div class="flex space-x-2">
+                        <input type="text" id="category-name" name="category-name" required class="flex-grow p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" placeholder="Ej: Viajes, Regalos">
+                        <button type="submit" class="p-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors shrink-0">
+                            Añadir
+                        </button>
+                    </div>
+                </form>
+
+                <h4 class="font-semibold text-gray-700 mb-2">Categorías Activas:</h4>
+                <div class="scroll-container bg-gray-50 border border-gray-200 rounded-lg">
+                    <ul id="categories-list" class="divide-y divide-gray-200">
+                        <!-- Populated by JS -->
+                    </ul>
+                </div>
+                
+                <div class="flex justify-end mt-6">
+                    <button type="button" onclick="closeModal(categoryModal)" class="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors">
+                        Cerrar
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- 5. Recurrent Modal -->
+    <div id="recurrent-modal" class="modal-backdrop hidden fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center p-4 z-40">
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg transform transition-all">
+            <form id="recurrent-modal-form" class="p-6">
+                <h3 class="text-2xl font-bold text-gray-800 mb-6">Definir Movimiento Recurrente</h3>
+                
+                <div class="grid grid-cols-2 gap-4 mb-4">
+                    <div>
+                        <label for="recurrent-type" class="block text-sm font-medium text-gray-700 mb-1">Tipo</label>
+                        <select id="recurrent-type" name="recurrent-type" required class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500">
+                            <option value="ingreso">Ingreso</option>
+                            <option value="gasto">Gasto</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label for="recurrent-category" class="block text-sm font-medium text-gray-700 mb-1">Categoría (Solo para Gasto)</label>
+                        <select id="recurrent-category" name="recurrent-category" required class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500">
+                            <option value="N/A">N/A (Ingreso)</option>
+                            <!-- Options populated by JS: updateCategoryDropdowns -->
+                        </select>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-2 gap-4 mb-4">
+                    <div>
+                        <label for="recurrent-amount" class="block text-sm font-medium text-gray-700 mb-1">Monto (COP)</label>
+                        <input type="number" id="recurrent-amount" name="recurrent-amount" min="1" step="any" required class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" placeholder="1000000">
+                    </div>
+                    <div>
+                        <label for="recurrent-day" class="block text-sm font-medium text-gray-700 mb-1">Día del Mes (1-31)</label>
+                        <input type="number" id="recurrent-day" name="recurrent-day" min="1" max="31" required class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" placeholder="15">
+                    </div>
+                </div>
+                
+                <div class="mb-6">
+                    <label for="recurrent-description" class="block text-sm font-medium text-gray-700 mb-1">Descripción</label>
+                    <input type="text" id="recurrent-description" name="recurrent-description" required class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" placeholder="Ej: Sueldo mensual, Pago de Renta">
+                </div>
+
+                <div class="flex justify-end space-x-3">
+                    <button type="button" onclick="closeModal(recurrentModal)" class="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors">
+                        Cancelar
+                    </button>
+                    <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 transition-colors">
+                        Guardar Recurrente
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Main Application Header -->
+    <header class="bg-white shadow-lg sticky top-0 z-30">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex justify-between items-center">
+            <h1 id="main-app-title" class="text-3xl font-extrabold text-gray-900 tracking-tight">
+                Control de Finanzas
+            </h1>
+            <div class="flex items-center space-x-4 text-right">
+                <div id="user-info-status" class="hidden md:block">
+                    <p id="user-name-display" class="font-semibold text-blue-700"></p>
+                    <p id="user-id-display" class="text-xs text-gray-500"></p>
+                </div>
+                <button id="change-user-btn" class="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors font-medium text-sm">
+                    Cambiar de Perfil (Nuevo ID)
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <!-- Login Screen (Hidden - only used as a container to satisfy previous code structure if needed) -->
+    <div id="login-screen" class="min-h-screen flex items-center justify-center p-6" style="display: none;">
+        <div class="text-center bg-white p-10 rounded-xl shadow-2xl max-w-sm">
+            <h2 class="text-2xl font-bold mb-4 text-gray-800">Cargando perfil...</h2>
+            <p class="text-gray-600 mb-6">Iniciando sesión segura con tu ID de plataforma.</p>
+        </div>
+    </div>
+
+    <!-- Main Application Content -->
+    <div id="main-content" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 hidden">
+        <div class="space-y-8">
+            <!-- HISTORICAL FILTER & MONTH DISPLAY -->
+            <div class="flex flex-col sm:flex-row justify-between items-center bg-white p-6 rounded-xl shadow-lg border border-gray-100">
+                <h2 class="text-2xl font-bold text-gray-800 mb-4 sm:mb-0">
+                    Reporte de: <span id="mes-actual-display" class="text-blue-600"></span>
+                </h2>
+                <input type="month" id="month-selector" class="p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 text-lg">
+            </div>
+
+            <!-- SUMMARY CARDS -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <!-- Ingresos Totales -->
+                <div class="bg-white p-6 rounded-xl shadow-lg border-l-4 border-green-500">
+                    <p class="text-sm font-medium text-gray-500">Ingresos Totales</p>
+                    <p id="summary-ingresos" class="text-3xl font-bold text-green-600 mt-1"></p>
+                </div>
+                <!-- Gastos Totales -->
+                <div class="bg-white p-6 rounded-xl shadow-lg border-l-4 border-red-500">
+                    <p class="text-sm font-medium text-gray-500">Gastos Totales</p>
+                    <p id="summary-gastos" class="text-3xl font-bold text-red-600 mt-1"></p>
+                </div>
+                <!-- Saldo Disponible -->
+                <div class="bg-white p-6 rounded-xl shadow-lg border-l-4 border-blue-500">
+                    <p class="text-sm font-medium text-gray-500">Saldo Disponible</p>
+                    <p id="summary-saldo" class="text-3xl font-bold mt-1 text-gray-700"></p>
+                </div>
+            </div>
+
+            <!-- TRANSACTION FORM & MANAGEMENT -->
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                
+                <!-- Columna 1: Formulario de Registro Rápido -->
+                <div class="lg:col-span-1 bg-white p-6 rounded-xl shadow-lg">
+                    <h2 class="text-xl font-bold text-gray-800 mb-4">Registrar Nueva Transacción</h2>
+                    <form id="transaccion-form" class="space-y-4">
+                        <input type="text" id="transaccion-description" placeholder="Descripción (Ej: Café, Sueldo)" required class="w-full p-3 border border-gray-300 rounded-lg">
+                        <div class="grid grid-cols-2 gap-4">
+                            <input type="number" id="transaccion-amount" placeholder="Monto (COP)" min="1" step="any" required class="w-full p-3 border border-gray-300 rounded-lg">
+                            <input type="date" id="transaccion-date" value="" required class="w-full p-3 border border-gray-300 rounded-lg">
+                        </div>
+                        <div class="grid grid-cols-2 gap-4">
+                            <select id="transaccion-type" required class="w-full p-3 border border-gray-300 rounded-lg">
+                                <option value="gasto">Gasto</option>
+                                <option value="ingreso">Ingreso</option>
+                            </select>
+                            <select id="categoria" disabled class="w-full p-3 border border-gray-300 rounded-lg opacity-50">
+                                <!-- Options populated by JS -->
+                            </select>
+                        </div>
+                        <button type="submit" class="w-full py-3 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 transition-colors">
+                            Añadir Transacción
+                        </button>
+                    </form>
+                </div>
+
+                <!-- Columna 2: Presupuesto y Gestión -->
+                <div class="lg:col-span-2 space-y-6">
+                    <!-- Presupuesto Mensual -->
+                    <div class="bg-white p-6 rounded-xl shadow-lg">
+                        <div class="flex justify-between items-center mb-4">
+                            <h2 class="text-xl font-bold text-gray-800">Presupuesto Mensual</h2>
+                            <button onclick="openModal(budgetModal)" class="text-blue-600 hover:text-blue-800 font-medium text-sm flex items-center">
+                                <span class="text-xl mr-1">+</span> Establecer Metas
+                            </button>
+                        </div>
+                        <div id="budget-list-container" class="scroll-container">
+                            <table class="min-w-full divide-y divide-gray-200">
+                                <thead class="bg-gray-50">
+                                    <tr>
+                                        <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Categoría</th>
+                                        <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Meta</th>
+                                        <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Gastado</th>
+                                        <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Progreso / Restante</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="budget-list-body-summary" class="bg-white divide-y divide-gray-200">
+                                    <!-- Populated by JS: updateBudgetSummary -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- Gestión de Recurrentes y Categorías -->
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                        <div class="bg-white p-4 rounded-xl shadow-lg border border-gray-100 flex items-center justify-between">
+                            <h3 class="font-medium text-gray-700">Categorías</h3>
+                            <button onclick="openModal(categoryModal)" class="px-3 py-1 bg-gray-100 text-blue-600 rounded-lg hover:bg-gray-200 text-sm font-medium">Gestionar</button>
+                        </div>
+                        <div class="bg-white p-4 rounded-xl shadow-lg border border-gray-100 flex items-center justify-between sm:col-span-2">
+                            <h3 class="font-medium text-gray-700">Movimientos Recurrentes</h3>
+                            <div class="flex space-x-2">
+                                <button id="recurrents-save-btn" onclick="saveGeneratedRecurrents()" class="px-3 py-1 bg-yellow-500 text-white rounded-lg hover:bg-yellow-600 text-xs font-medium hidden">Guardar Recurrentes Generados</button>
+                                <button onclick="openModal(recurrentModal)" class="px-3 py-1 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium">Añadir</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Gestión de Datos (Exportación) -->
+                    <div class="bg-white p-6 rounded-xl shadow-lg border border-gray-100">
+                        <h2 class="text-xl font-bold text-gray-800 mb-4">Análisis y Gestión de Datos</h2>
+                        <div class="flex flex-col sm:flex-row items-center space-y-4 sm:space-y-0 sm:space-x-4">
+                            <select id="export-scope" class="p-3 border border-gray-300 rounded-lg">
+                                <option value="currentMonth">Exportar Solo Mes Actual</option>
+                                <option value="fullHistory">Exportar Todo el Historial</option>
+                            </select>
+                            <button onclick="exportToCsv()" class="w-full sm:w-auto py-3 px-6 bg-teal-600 text-white rounded-lg font-semibold hover:bg-teal-700 transition-colors flex items-center justify-center space-x-2">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                    <path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L10 11.586l2.293-2.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clip-rule="evenodd" />
+                                    <path fill-rule="evenodd" d="M10 3a1 1 0 011 1v7a1 1 0 11-2 0V4a1 1 0 011-1z" clip-rule="evenodd" />
+                                </svg>
+                                <span>Exportar a CSV/Excel</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- DETAILED VIEW: LIST & CHART -->
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                <!-- Columna 1 y 2: Lista de Transacciones -->
+                <div class="lg:col-span-2 bg-white p-6 rounded-xl shadow-lg">
+                    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4">
+                        <h2 class="text-xl font-bold text-gray-800 mb-2 sm:mb-0">Detalle de Transacciones</h2>
+                        <div id="transactions-filter" class="flex space-x-2 bg-gray-100 p-1 rounded-lg">
+                            <button data-filter="all" onclick="handleFilterClick(event)" class="px-4 py-1.5 rounded-lg text-sm font-medium bg-blue-600 text-white">Todas</button>
+                            <button data-filter="income" onclick="handleFilterClick(event)" class="px-4 py-1.5 rounded-lg text-sm font-medium bg-white text-blue-600 hover:bg-blue-50">Ingresos</button>
+                            <button data-filter="expense" onclick="handleFilterClick(event)" class="px-4 py-1.5 rounded-lg text-sm font-medium bg-white text-blue-600 hover:bg-blue-50">Gastos</button>
+                        </div>
+                    </div>
+                    
+                    <!-- Recurrents List embedded above Transactions -->
+                    <div id="recurrents-section" class="mb-4">
+                        <h3 class="text-lg font-semibold text-gray-700 mb-2">Movimientos Recurrentes Guardados:</h3>
+                        <div class="scroll-container border border-gray-200">
+                            <ul id="recurrents-list" class="divide-y divide-gray-200 bg-white">
+                                <!-- Populated by JS -->
+                            </ul>
+                        </div>
+                    </div>
+
+                    <div class="scroll-container border border-gray-200">
+                        <ul id="transactions-list" class="divide-y divide-gray-200 bg-white">
+                            <!-- Populated by JS: updateTransactionsList -->
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Columna 3: Gráfico de Gastos -->
+                <div class="lg:col-span-1 bg-white p-6 rounded-xl shadow-lg flex flex-col items-center">
+                    <h2 class="text-xl font-bold text-gray-800 mb-4 text-center">Distribución de Gastos</h2>
+                    <div class="chart-container flex-grow">
+                        <canvas id="expense-chart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+</body>
+</html>
